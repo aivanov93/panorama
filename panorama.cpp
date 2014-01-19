@@ -42,7 +42,7 @@ Image<float> calculate_gaussian(double sigmaD){
 	return convolution;
 }
 
-Func convolve(Func input, Image<float> convolution,  int grayscale){
+Func convolve(Func input, Image<float> & convolution,  int grayscale){
 
 	RDom r(convolution);
 	int w=convolution.width(), h=convolution.height();
@@ -54,7 +54,14 @@ Func convolve(Func input, Image<float> convolution,  int grayscale){
 		blur(x, y) =sum(convolution(r.x, r.y) * input(x + r.x - w/2, y + r.y - h/2));
 	}
 	/*0.47s blur.compute_root().tile(x,y,xo,yo,xi,yi,300,300).fuse(xo,yo,tile_index).parallel(tile_index).vectorize(xi,16);/**/
-	/*0.37s*/ blur.compute_root().vectorize(x,16).parallel(y);
+	/*0.37s*/ 
+	 Target target = get_target_from_environment();
+	if (target.features & (Target::CUDA | Target::OpenCL)) {
+		std::cout<<"found gpu \n";
+		blur.cuda_tile(x,y,20,20).compute_root(); }
+	else {
+		blur.compute_root().vectorize(x,16).parallel(y);
+	}
 	return blur;
 }
 
@@ -187,29 +194,15 @@ arma::mat translate(arma::mat bounding_box){
 Image<uint8_t> apply_homography(const Image<uint8_t>& im1, const Image<uint8_t>& im2, arma::mat H){
 	Expr w2=im2.width(), h2=im2.height();
     Var x("x"),y("y"),c("c");
-	Func apply("homo"), Final("Final"), high1,high2;
+	Func apply("homo"), Final("Final");
 	
 	apply(x,y,c)=select( ( (dot_prod_expr(x,y,H,0)<0) || (dot_prod_expr(x,y,H,0)>w2-1) || (dot_prod_expr(x,y,H,1)<0) || (dot_prod_expr(x,y,H,1)>h2-1) ), im1(x,y,c),im2(clamp(dot_prod_expr(x,y,H,0),0,w2-1), clamp(dot_prod_expr(x,y,H,1),0,h2-1),c));
 	Image<uint8_t> output = apply.realize(im1.width(), im1.height(),im1.channels());
 	return output;
 }
 
-Image<uint8_t> stitch( Image<uint8_t>& im1,  Image<uint8_t>& im2, int point_list1 [4][2], int point_list2 [4][2]){
-	arma::mat H=calculate_homography(point_list1, point_list2);
-	arma::mat b2=compute_transformed_bbox(im2, H);
-	arma::mat b1;
-	b1<<0<<0<<arma::endr
-	  <<im1.height()-1<<im1.width()-1<<arma::endr;
-	arma::mat box=bbox_union(b1,b2);
-	Image<uint8_t> black(box(1,1)-box(0,1),box(1,0)-box(0,0),3);
-	arma::mat T=translate(box);
-	T(0,2)*=-1;
-	black=apply_homography(black, im1,  T);
-	arma::mat HT=H*T;
-	return apply_homography(black, im2,  HT);
-}
 
-Image<uint8_t> stitch_h( Image<uint8_t>& im1, Image<uint8_t>& im2, arma::mat & H){
+Image<uint8_t> stitch( Image<uint8_t>& im1, Image<uint8_t>& im2, arma::mat & H){
 	arma::mat b2=compute_transformed_bbox(im2, H);
 	arma::mat b1;
 	b1<<0<<0<<arma::endr
@@ -251,7 +244,9 @@ Func calculate_tensor( Image<uint8_t>& im, double sigma_g=1, double factor_sigma
 	//schedule everything
 	luminance.compute_root();	
 	//gradient_x.compute_root().parallel(y);
-	//grandient_x.compute_at(tensor,)
+	//gradient_x.compute_at(tensor,y);
+	//gradient_y.reorder(y,x).compute_at(tensor,x);
+	
 	tensor.reorder(c,x,y).compute_root();
 	
 	return tensor_blurred;
@@ -293,7 +288,7 @@ Image<int> harris_corners(Image<uint8_t>& im, int max_diam=10, float k=0.15, dou
 	corner_response.compute_root().parallel(y).vectorize(x,16);
 	
 	maximum_window.reorder(x,y).compute_root();
-	maximum_window_x.store_at(maximum_window,x).compute_at(maximum_window,x).vectorize(x,4);
+	maximum_window_x.compute_root();//store_at(maximum_window,x).compute_at(maximum_window,x).vectorize(x,4);
 	
 	//show the corners
 	//begin_timing;
@@ -535,17 +530,10 @@ void VisualizeCorrespondences(Image<uint8_t> im1, Image<uint8_t> im2, Image<int>
 	}
 }
 
-
-int main(int argc, char **argv) {
-	srand(time(NULL));
-	Image<uint8_t> im1 = load<uint8_t>("images/iphone1.png");
-	Image<uint8_t> im2 = load<uint8_t>("images/iphone2.png");
-
-	int pointList1 [4][2]={{209, 218},{425, 300},{209,337},{396, 336}};
-    int pointList2 [4][2]={{232, 4},{465, 62},{247, 125},{433, 102}};
-
-	Image<uint8_t> output;
+void auto_stitch(Image<uint8_t>& im1, Image<uint8_t>& im2, Image<uint8_t>& destination){
+	
 	begin_timing
+	
 	Image<int> corners1=harris_corners(im1, 10, 0.15, 1, 5,  5);
 	std::cout<<"corners in main"; end_timing;
 	
@@ -565,7 +553,17 @@ int main(int argc, char **argv) {
 
 	arma::mat H=ransac(correspondences,10000,4);
 
-	output=stitch_h(im1,im2,H);
+	destination=stitch(im1,im2,H);
+	
+}
+
+int main(int argc, char **argv) {
+	srand(time(NULL));
+	Image<uint8_t> im1 = load<uint8_t>("images/iphone1.png");
+	Image<uint8_t> im2 = load<uint8_t>("images/iphone2.png");
+
+	Image<uint8_t> output;
+	auto_stitch(im1,im2, output);
 	save(output, "stitch2.png");
 
 	printf("Success!\n");
