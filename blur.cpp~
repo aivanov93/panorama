@@ -1,0 +1,25 @@
+// g++ blur.cpp -I ../include -L ../bin -rdynamic -lHalide -lpthread -ldl -lpng -o lesson_04
+
+// LD_LIBRARY_PATH=../bin ./lesson_04
+
+#include <Halide.h>
+#include <stdio.h>
+using namespace Halide;
+#include "../apps/support/image_io.h"
+extern "C" uint8_t snoop(uint8_t val1,uint8_t val2,uint8_t val3) {
+    //printf("Values %d,%d,%d and %d\n", val1, val2, val3,(val1+val2+val3)/3);
+    return (val1+val2+val3)/3;
+}
+HalideExtern_3(uint8_t, snoop, uint8_t,uint8_t, uint8_t);
+int main(int argc, char **argv) {
+    Image<uint8_t> input = load<uint8_t>("../apps/images/rgb.png");
+    Func blur_y("blur_y");
+    Var x("x"), y("y"), c("c");
+    //blur_y(x,y,c)= snoop(input(x, y, c),input(x, max(y-1,0), c),input(x, min(y+1,input.height()-1), c));
+    blur_y(x,y,c)= (  input(x, y, c)  +   input(x, max(y-1,0), c)  +   input(x, min(y+1,input.height()-1)  )/3;
+    Image<uint8_t> output = blur_y.realize(input.width(), input.height(), input.channels());
+    save(output, "blur.png");
+    
+    printf("Success!\n");
+    return 0;
+}

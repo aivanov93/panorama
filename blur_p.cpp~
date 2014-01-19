@@ -1,0 +1,24 @@
+// g++ lesson_02.cpp -I ../include -L ../bin -lHalide -lpthread -ldl -lpng -o lesson_02
+// LD_LIBRARY_PATH=../bin ./lesson_02
+
+#include <Halide.h>
+#include <stdio.h>
+using namespace Halide;
+#include "../apps/support/image_io.h"
+int av(uint8_t a, uint8_t b, uint8_t c) {
+	return (a+b+c)/3
+}
+int main(int argc, char **argv) {
+    Image<uint8_t> in = load<uint8_t>("../apps/images/rgb.png");
+    int W=in.width(), H=in.height();
+    Func blur_y("blur_y");
+    Var x("x"), y("y"), c("c");
+    Func input("input");
+    input(x, y,c) = in(clamp(x, 0, W-1), clamp(y, 0, H-1),c);
+    
+    blur_y(x,y,c)= av(   input(x, y, c)  ,   input(x, y-1, c)  ,   input(x,y+1, c)  );
+    Image<uint8_t> output = blur_y.realize(W, H, in.channels());
+    save(output, "blur.png");    
+    printf("Success!\n");
+    return 0;
+}
