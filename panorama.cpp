@@ -1,4 +1,4 @@
-// g++ panorama.cpp -I ../include -L ../bin -rdynamic -lHalide -lpthread -ldl  -lpng  -larmadillo -o lesson_04 && LD_LIBRARY_PATH=../bin ./lesson_04
+// g++ panorama.cpp -I ../include -L ../bin -rdynamic -lHalide -lpthread -ldl  -lpng  -larmadillo -o panorama && LD_LIBRARY_PATH=../bin ./panorama
 
 #include <Halide.h>
 
