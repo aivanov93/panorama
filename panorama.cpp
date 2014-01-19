@@ -18,6 +18,9 @@ timeval t1, t2; float timex;
 #define begin_timing gettimeofday(&t1, NULL); 
 #define end_timing  gettimeofday(&t2, NULL); timex = (t2.tv_sec - t1.tv_sec)*1.0f + (t2.tv_usec - t1.tv_usec) / 1000000.0f ; std::cout<<timex<<"s \n";
 
+/**
+ * Returns a gaussian kernel with the given sigma
+ */
 Image<float> calculate_gaussian(double sigmaD){
 	int sigma=(int)floor(sigmaD*3);
 	Image<float> convolution(sigma*2+1,sigma*2+1); float sum=0;
@@ -42,6 +45,10 @@ Image<float> calculate_gaussian(double sigmaD){
 	return convolution;
 }
 
+/**
+ * convolves the given input with the kernel.
+ * input needs to be clamped to avoid dark edges
+ */
 Func convolve(Func input, Image<float> & convolution,  int grayscale){
 
 	RDom r(convolution);
@@ -65,11 +72,18 @@ Func convolve(Func input, Image<float> & convolution,  int grayscale){
 	return blur;
 }
 
+/**
+ * Applies gaussian blur to the given Halide Func
+ */
 Func blur_gaussian(Func im, float sigma, int grayscale){
 	Image<float> gaussian=calculate_gaussian(sigma);
 	return convolve(im,gaussian, grayscale);
 }
 
+
+/**
+ * Calculates the new point after homography is applied to it
+ */
 arma::vec dot_prod_number(double x, double y, arma::mat H1){
 	arma::fmat H=arma::conv_to<arma::fmat>::from(H1);
     float in [3]={0.0f,0.0f,1.0f}; in[0]=y; in[1]=x;
@@ -86,6 +100,9 @@ arma::vec dot_prod_number(double x, double y, arma::mat H1){
 };
 
 
+/**
+ * Calculates the new point after homography is applied to it
+ */
 Expr dot_prod_expr(Expr x, Expr y, arma::mat H1,int ind){
 	arma::fmat H=arma::conv_to<arma::fmat>::from(H1);
     Expr in [3]={0.0f,0.0f,1.0f}; in[0]=y; in[1]=x;
@@ -122,6 +139,9 @@ Expr dotPf(Expr x, Expr y, arma::mat H1,int ind){
     };
 };
 
+/**
+ * Calculates the homography from the given list of corresponding points
+ */
 arma::mat calculate_homography( int  point_list1 [4][2], int  point_list2 [4][2]){
 	arma::mat A(9,9); A.fill(0.0);
 	A(8,8)=1;
@@ -148,7 +168,9 @@ arma::mat calculate_homography( int  point_list1 [4][2], int  point_list2 [4][2]
 	return H;
 }
 
-
+/**
+ * Calculates a new bounding box for the image with the homography applied to it
+ */
 arma::mat compute_transformed_bbox(const Image<uint8_t> im, arma::mat H){
 	arma::mat H1=arma::inv(H);
 	int xmin=0,xmax=0.,ymin=0,ymax=0;
@@ -168,6 +190,9 @@ arma::mat compute_transformed_bbox(const Image<uint8_t> im, arma::mat H){
 	return M;
 }
 
+/**
+ * Calculates the bounding box of the two given boxes
+ */
 arma::mat bbox_union(arma::mat B1, arma::mat B2){
 	int ymin=std::min(B1(0,0),B2(0,0));
 	int xmin=std::min(B1(0,1),B2(0,1));
@@ -180,7 +205,9 @@ arma::mat bbox_union(arma::mat B1, arma::mat B2){
 }
 
 
-
+/**
+ * Calculates the translation matrix
+ */
 arma::mat translate(arma::mat bounding_box){
 	int tx=-bounding_box(0,1);
 	int ty=-bounding_box(0,0);
@@ -191,76 +218,108 @@ arma::mat translate(arma::mat bounding_box){
 	return M;
 }
 
-Func apply_homography(Image<uint8_t>& im1, Image<uint8_t>& im2, arma::mat H){
-	Expr w2=im2.width(), h2=im2.height();
-    Var x("x"),y("y"),c("c");
+
+/**
+ * Applies the given homography to the second image projecting it on the first one
+ * Returns a Halide Func
+ */
+Func apply_homography(Func im1, Func im2, arma::mat& H, int w2, int h2, bool grayscale){
+	Var x("x"),y("y"),c("c");
 	Func apply("homo"), Final("Final");
-	
-	apply(x,y,c)=select( ( (dot_prod_expr(x,y,H,0)<0) || 
+	if (grayscale){
+		apply(x,y)=select( ( (dot_prod_expr(x,y,H,0)<0) || 
 						   (dot_prod_expr(x,y,H,0)>w2-1) || 
 						   (dot_prod_expr(x,y,H,1)<0) || 
 						   (dot_prod_expr(x,y,H,1)>h2-1) ), 
-						   im1(x,y,c),im2(clamp(dot_prod_expr(x,y,H,0),0,w2-1), 
-						   clamp(dot_prod_expr(x,y,H,1),0,h2-1),c));
+						   cast<float>(im1(x,y,0)),
+						   cast<float>(im2(clamp(dot_prod_expr(x,y,H,0),0,w2-1), clamp(dot_prod_expr(x,y,H,1),0,h2-1))));
+		
+	} else {
+		apply(x,y,c)=select( ( (dot_prod_expr(x,y,H,0)<0) || 
+							  (dot_prod_expr(x,y,H,0)>w2-1) || 
+							  (dot_prod_expr(x,y,H,1)<0) || 
+						      (dot_prod_expr(x,y,H,1)>h2-1) ), 
+						       cast<float>(im1(x,y,c)),
+						       cast<float>(im2(clamp(dot_prod_expr(x,y,H,0),0,w2-1), clamp(dot_prod_expr(x,y,H,1),0,h2-1),c)));
+		apply.reorder(c,x,y);
+	}
+	apply.parallel(y).vectorize(x,16).compute_root();
 	return apply;
 }
 
-Expr adjuset_weights(Expr weight1, Expr weight2, int index){
-		if (weight1==0){
-			
-		}
-}
 
+/**
+ * Stiches two images together using the given homography matrix
+ */
 
-
-Image<uint8_t> stitch( Image<uint8_t>& im_1, Image<uint8_t>& im_2, arma::mat & H){
+Image<uint8_t> stitch( Image<uint8_t>& im1, Image<uint8_t>& im2, arma::mat & H){
 	arma::mat b2=compute_transformed_bbox(im2, H);
 	arma::mat b1;
 	int w1=im1.width(), w2=im2.width(), h1=im1.height(), h2=im2.height();
+	Var x,y,c;
 	
 	//calculate the bounding box for stitched images
 	b1<<0<<0<<arma::endr
 	  <<h1-1<<w1-1<<arma::endr;
 	arma::mat box=bbox_union(b1,b2);
-	Image<uint8_t> black(box(1,1)-box(0,1),box(1,0)-box(0,0),3);
+	
+	int final_width=box(1,1)-box(0,1), final_height=box(1,0)-box(0,0);
 	arma::mat translation_matrix=translate(box);
-	T(0,2)*=-1;
+	translation_matrix(0,2)*=-1;
 	
 	//calculate weights
-	Func weight1(x,y)=x/w1+y/h1;
-	Image<uint8_t> weight_1=weight1.realize(w1,h1);
-	Func wight2(x,y)=x/w2+y/h2;	
-	Image<uint8_t> weight_1=weight1.realize(w1,h1);
+	Func black, image1, image2, high_frequency1("high1"), high_frequency2("high2"), low_frequency1("low1"), low_frequency2("low2"), final_low("final_low"), final_high("final_height"), final("final"), weight1, weight2;
+	black(x,y,c)=cast<uint8_t>(0);
 	
+	//calculate the weights of two images
+	weight1(x,y)=Expr(0.25f)*select(x<w1/2, cast<float>(x)/w1, cast<float>(w1-x)/w1)*select(y<h1/2, cast<float>(y)/h1, cast<float>(h1-y)/h1);
+	weight2(x,y)=Expr(0.25f)*select(x<w2/2, cast<float>(x)/w2, cast<float>(w2-x)/w2)*select(y<h2/2, cast<float>(y)/h2, cast<float>(h2-y)/h2);	
 	
+
 	//translate the first one
-	Func transformed1=apply_homography(black, im1,  translation_matrix);
-	Func transformed_weight1=apply_homography(black, weight1,  translation_matrix);
+	image1(x,y,c)=im1(clamp(x, 0, w1-1), clamp(y,0, h1-1),c); 
+	Func transformed1=apply_homography(black, image1,  translation_matrix, w1,h1, false);
+	Func transformed_weight1=apply_homography(black, weight1,  translation_matrix, w1,h1, true);
+		
 	
 	//transform the second one
+	image2(x,y,c)=im2(clamp(x, 0, w2-1), clamp(y,0, h2-1),c);
 	arma::mat homography=H*translation_matrix;
-	Func transformed2=apply_homography(black,im2, homography);
-	Func transformed_weight2=apply_homography(black, weight_2,  translation_matrix);
+	Func transformed2=apply_homography(black,image2, homography, w2,h2, false);
+	Func transformed_weight2=apply_homography(black, weight2,  homography, w2,h2, true);
+	
 	
 	//calculate the high and low frequencies of both images
-	Func low_frequency1=blur_gaussian(transformed1, 5, 0);
-	Func high_frequency1=transformed1-low_frequency1;
+	low_frequency1=apply_homography(black, blur_gaussian(image1, 15, 0),  translation_matrix, w1,h1, false);
+	high_frequency1(x,y,c)=transformed1(x,y,c)-low_frequency1(x,y,c);
 	
-	Func low_frequency1=blur_gaussian(transformed1, 5, 0);
-	Func high_frequency1=cast<uint8_t>(transformed1-low_frequency1);
+	low_frequency2=apply_homography(black, blur_gaussian(image2, 15, 0),  homography, w2,h2, false);
+	high_frequency2(x,y,c)=transformed2(x,y,c)-low_frequency2(x,y,c);
 	
+	
+
+	std::cout<<"passed frequency\n";
+
 	//calculate the final high frequency based on weights
-	Func final_high(x,y,c)=select(transformed_weight1(x,y)>transformed_weight2(x,y), high_frequency1(x,y,c),high_frequency2(x,y,c));
-	Func final_low(x,y,c)=select(transformed_weight1(x,y)>0, 
-								 (transformed_weight1(x,y)*low_frequency1(x,y,c)+transformed_weight2(x,y)*low_frequency2(x,y,c))/(transformed_weight1(x,y)+transformed_weight1(x,y)),
-								 low_frequency2(x,y,c));
-								 
-	Func final(x,y,c)=cast<uint8>(final_high(x,y,c)+final_low(x,y,c));
-	final.realize(black.width(), black.height());							 
+	final_high(x,y,c)=select(transformed_weight1(x,y)>transformed_weight2(x,y), cast<float>(high_frequency1(x,y,c)), cast<float>(high_frequency2(x,y,c)));
+	final_low(x,y,c)=select(transformed_weight1(x,y)>Expr(0),
+							select(transformed_weight2(x,y)>Expr(0),
+							      (transformed_weight1(x,y)*low_frequency1(x,y,c)+transformed_weight2(x,y)*low_frequency2(x,y,c))/(transformed_weight1(x,y)+transformed_weight2(x,y)),
+							       low_frequency1(x,y,c)),
+							low_frequency2(x,y,c));											
+    						
+    							 
+	final(x,y,c)=cast<uint8_t>(final_low(x,y,c)+final_high(x,y,c));
+	
+	//schedules
+	
+	return final.realize(final_width, final_height,3);							 
 }
 
 
-
+/**
+ * Calculates the tensor of the given image
+ */
 Func calculate_tensor( Image<uint8_t>& im, double sigma_g=1, double factor_sigma=4){
 	Var x,y,c,xo,yo,xi,yi,tile_index;
 	Func clamped,tensor_im, tensor,luminance("lum"), luminance_blurred("luminance blurred"), gradient_x("gx"), gradient_x1,gradient_y("gy"), tensor_blurred("tensor_blurred");
@@ -295,12 +354,10 @@ Func calculate_tensor( Image<uint8_t>& im, double sigma_g=1, double factor_sigma
 	return tensor_blurred;
 }
 
-/*
- * 	begin_timing
-		tensor.realize(w,h,3);
-		std::cout<<"tensor "; end_timing
-	
-	*/
+
+/**
+ * Returns a list of Harris Corners in the given image
+ */
 Image<int> harris_corners(Image<uint8_t>& im, int max_diam=10, float k=0.15, double sigma_g=1, double factor=4,  double boundary_size=5){
 	
 	Var x("x"),y("y"),c("c"),yo,yi,xo,xi,tile;
